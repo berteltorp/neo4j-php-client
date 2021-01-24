@@ -11,7 +11,7 @@
 
 namespace GraphAware\Neo4j\Client\Transaction;
 
-use GraphAware\Bolt\Exception\MessageFailureException;
+use PTS\Bolt\Exception\MessageFailureException;
 use GraphAware\Common\Cypher\Statement;
 use GraphAware\Common\Result\Result;
 use GraphAware\Common\Transaction\TransactionInterface;
@@ -74,20 +74,25 @@ class Transaction
      */
     public function run($statement, array $parameters = [], $tag = null)
     {
-        if (!$this->driverTransaction->isOpen() && !in_array($this->driverTransaction->status(), ['COMMITED', 'ROLLED_BACK'], true)) {
+        if (!$this->driverTransaction->isOpen()
+            && !in_array($this->driverTransaction->status(), ['COMMITED', 'ROLLED_BACK'], true)
+        ) {
             $this->driverTransaction->begin();
         }
         $stmt = Statement::create($statement, $parameters, $tag);
-        $this->eventDispatcher->dispatch(Neo4jClientEvents::NEO4J_PRE_RUN, new PreRunEvent([$stmt]));
+        $this->eventDispatcher->dispatch(new PreRunEvent([$stmt]), Neo4jClientEvents::NEO4J_PRE_RUN);
         try {
             $result = $this->driverTransaction->run(Statement::create($statement, $parameters, $tag));
-            $this->eventDispatcher->dispatch(Neo4jClientEvents::NEO4J_POST_RUN, new PostRunEvent(ResultCollection::withResult($result)));
+            $this->eventDispatcher->dispatch(
+                new PostRunEvent(ResultCollection::withResult($result)),
+                Neo4jClientEvents::NEO4J_POST_RUN
+            );
         } catch (MessageFailureException $e) {
             $exception = new Neo4jException($e->getMessage());
             $exception->setNeo4jStatusCode($e->getStatusCode());
 
             $event = new FailureEvent($exception);
-            $this->eventDispatcher->dispatch(Neo4jClientEvents::NEO4J_ON_FAILURE, $event);
+            $this->eventDispatcher->dispatch($event, Neo4jClientEvents::NEO4J_ON_FAILURE);
             if ($event->shouldThrowException()) {
                 throw $exception;
             }
@@ -116,7 +121,9 @@ class Transaction
      */
     public function runStack(StackInterface $stack)
     {
-        if (!$this->driverTransaction->isOpen() && !in_array($this->driverTransaction->status(), ['COMMITED', 'ROLLED_BACK'], true)) {
+        if (!$this->driverTransaction->isOpen()
+            && !in_array($this->driverTransaction->status(), ['COMMITED', 'ROLLED_BACK'], true)
+        ) {
             $this->driverTransaction->begin();
         }
 
@@ -126,16 +133,16 @@ class Transaction
             $sts[] = $statement;
         }
 
-        $this->eventDispatcher->dispatch(Neo4jClientEvents::NEO4J_PRE_RUN, new PreRunEvent($stack->statements()));
+        $this->eventDispatcher->dispatch(new PreRunEvent($stack->statements()), Neo4jClientEvents::NEO4J_PRE_RUN);
         try {
             $results = $this->driverTransaction->runMultiple($sts);
-            $this->eventDispatcher->dispatch(Neo4jClientEvents::NEO4J_POST_RUN, new PostRunEvent($results));
+            $this->eventDispatcher->dispatch(new PostRunEvent($results), Neo4jClientEvents::NEO4J_POST_RUN);
         } catch (MessageFailureException $e) {
             $exception = new Neo4jException($e->getMessage());
             $exception->setNeo4jStatusCode($e->getStatusCode());
 
             $event = new FailureEvent($exception);
-            $this->eventDispatcher->dispatch(Neo4jClientEvents::NEO4J_ON_FAILURE, $event);
+            $this->eventDispatcher->dispatch($event, Neo4jClientEvents::NEO4J_ON_FAILURE);
             if ($event->shouldThrowException()) {
                 throw $exception;
             }
@@ -187,7 +194,9 @@ class Transaction
      */
     public function commit()
     {
-        if (!$this->driverTransaction->isOpen() && !in_array($this->driverTransaction->status(), ['COMMITED', 'ROLLED_BACK'], true)) {
+        if (!$this->driverTransaction->isOpen()
+            && !in_array($this->driverTransaction->status(), ['COMMITED', 'ROLLED_BACK'], true)
+        ) {
             $this->driverTransaction->begin();
         }
         if (!empty($this->queue)) {
@@ -202,11 +211,24 @@ class Transaction
                 }
             }
 
-            $result = $this->driverTransaction->runMultiple($stack);
-            $this->driverTransaction->commit();
-            $this->queue = [];
-
-            return $result;
+            try {
+                $result = $this->driverTransaction->runMultiple($stack);
+                $this->driverTransaction->commit();
+                $this->eventDispatcher->dispatch(new PostRunEvent($result), Neo4jClientEvents::NEO4J_POST_RUN);
+                $this->queue = [];
+                return $result;
+            } catch (MessageFailureException $e) {
+                $this->driverTransaction->rollback();
+                $exception = new Neo4jException($e->getMessage());
+                $exception->setNeo4jStatusCode($e->getStatusCode());
+    
+                $event = new FailureEvent($exception);
+                $this->eventDispatcher->dispatch($event, Neo4jClientEvents::NEO4J_ON_FAILURE);
+                if ($event->shouldThrowException()) {
+                    throw $exception;
+                }
+                return null;
+            }
         }
 
         return $this->driverTransaction->commit();
